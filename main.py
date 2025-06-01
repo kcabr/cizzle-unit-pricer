@@ -2,37 +2,43 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import xml.etree.ElementTree as ET
 import os
+from datetime import datetime
 
 # --- Constants ---
 # Conversion factors to base units
 # Base unit for Dry is gram (g)
 DRY_UNITS_TO_BASE = {
     "g": 1.0,
-    "oz (weight)": 28.3495,
+    "oz": 28.3495,
     "lb": 453.592,
+    "kg": 1000.0,
 }
 # Base unit for Liquid is milliliter (ml)
 LIQUID_UNITS_TO_BASE = {
     "ml": 1.0,
-    "fl oz (US)": 29.5735,
+    "fl oz": 29.5735,
     "L": 1000.0,
-    "cup (US fluid)": 236.588,
-    "pint (US fluid)": 473.176,
-    "quart (US fluid)": 946.353,
-    "gallon (US fluid)": 3785.41,
+    "cup": 236.588,
+    "pint": 473.176,
+    "quart": 946.353,
+    "gallon": 3785.41,
 }
+
+# Store options
+STORE_OPTIONS = ["Aldi", "Amazon", "Target", "Walmart", "Other"]
 
 # Units to display in output columns (and their conversion factor from the base unit)
 # For Dry (base: g)
 DRY_OUTPUT_UNITS = {
     "per g": 1.0,
-    "per oz (weight)": DRY_UNITS_TO_BASE["oz (weight)"],  # grams per oz
-    "per lb": DRY_UNITS_TO_BASE["lb"],          # grams per lb
+    "per oz": DRY_UNITS_TO_BASE["oz"],  # grams per oz
+    # "per lb": DRY_UNITS_TO_BASE["lb"],          # grams per lb
+    # "per kg": DRY_UNITS_TO_BASE["kg"],          # grams per kg
 }
 # For Liquid (base: ml)
 LIQUID_OUTPUT_UNITS = {
     "per ml": 1.0,
-    "per fl oz (US)": LIQUID_UNITS_TO_BASE["fl oz (US)"],  # ml per fl oz
+    "per fl oz": LIQUID_UNITS_TO_BASE["fl oz"],  # ml per fl oz
     "per L": LIQUID_UNITS_TO_BASE["L"],              # ml per L
 }
 
@@ -48,6 +54,9 @@ class UnitCostCalculatorApp:
 
         self.session_unit_type = None  # "Dry" or "Liquid"
         self.session_title = "Untitled Session"  # Track session title
+        self.current_filename = None  # Track current saved filename for auto-save
+        self.is_saved = True  # Track if current state is saved
+        self.last_save_time = None  # Track last save time
         self.input_rows_data = []  # Stores dicts of tk.Vars for each row
         self.input_row_frames = []  # Stores the Frame widget for each input row
 
@@ -69,10 +78,21 @@ class UnitCostCalculatorApp:
         controls_frame.pack(fill=tk.X)
 
         # File operations
+        ttk.Button(controls_frame, text="New Session",
+                   command=self.new_session).pack(side=tk.LEFT, padx=5)
         ttk.Button(controls_frame, text="Save Session",
                    command=self.save_session).pack(side=tk.LEFT, padx=5)
         ttk.Button(controls_frame, text="Load Session",
                    command=self.load_session).pack(side=tk.LEFT, padx=5)
+
+        # Save status and time
+        self.save_status_label = ttk.Label(
+            controls_frame, text="● Saved", foreground="green")
+        self.save_status_label.pack(side=tk.LEFT, padx=(15, 5))
+
+        self.last_save_label = ttk.Label(
+            controls_frame, text="", foreground="gray")
+        self.last_save_label.pack(side=tk.LEFT, padx=5)
 
         # Separator
         ttk.Separator(controls_frame, orient=tk.VERTICAL).pack(
@@ -188,21 +208,65 @@ class UnitCostCalculatorApp:
             "quantity_var": tk.StringVar(),
             "unit_type_var": tk.StringVar(),
             "unit_var": tk.StringVar(),
+            "store_var": tk.StringVar(),
+            "url_var": tk.StringVar(),
         }
 
+        # Copy defaults from previous row if not the first row
+        if not is_initial_row and self.input_rows_data:
+            prev_row = self.input_rows_data[-1]
+            # Copy product name for easy replacement
+            row_data["name_var"].set(prev_row["name_var"].get())
+            row_data["store_var"].set(prev_row["store_var"].get())
+            row_data["unit_type_var"].set(prev_row["unit_type_var"].get())
+            row_data["unit_var"].set(prev_row["unit_var"].get())
+
+        # Row number
         ttk.Label(row_frame, text=f"{row_idx+1}.",
                   width=3).pack(side=tk.LEFT, padx=2)
 
+        # Product name
         ttk.Label(row_frame, text="Product:").pack(side=tk.LEFT, padx=2)
         name_entry = ttk.Entry(
-            row_frame, textvariable=row_data["name_var"], width=20)
+            row_frame, textvariable=row_data["name_var"], width=18)
         name_entry.pack(side=tk.LEFT, padx=2)
 
+        # Add focus event to select all text in product field for easy replacement
+        def on_product_focus(event):
+            name_entry.select_range(0, 'end')
+            name_entry.icursor('end')
+        name_entry.bind('<FocusIn>', on_product_focus)
+        name_entry.bind(
+            '<Button-1>', lambda e: name_entry.after(1, on_product_focus, e))
+
+        # Bind to StringVar changes for auto-save
+        def on_field_change(*args):
+            self.mark_unsaved()  # Mark as unsaved first
+            # Auto-save after current event processing
+            self.root.after_idle(self.auto_save)
+
+        row_data["name_var"].trace_add("write", on_field_change)
+        row_data["price_var"].trace_add("write", on_field_change)
+        row_data["quantity_var"].trace_add("write", on_field_change)
+        row_data["unit_type_var"].trace_add("write", on_field_change)
+        row_data["unit_var"].trace_add("write", on_field_change)
+        row_data["store_var"].trace_add("write", on_field_change)
+        row_data["url_var"].trace_add("write", on_field_change)
+
+        # Store selection
+        ttk.Label(row_frame, text="Store:").pack(side=tk.LEFT, padx=2)
+        store_cb = ttk.Combobox(row_frame, textvariable=row_data["store_var"],
+                                values=STORE_OPTIONS, width=8, state='readonly')
+        store_cb.pack(side=tk.LEFT, padx=2)
+        row_data["store_combobox"] = store_cb
+
+        # Price
         ttk.Label(row_frame, text="Price ($):").pack(side=tk.LEFT, padx=2)
         price_entry = ttk.Entry(
             row_frame, textvariable=row_data["price_var"], width=7)
         price_entry.pack(side=tk.LEFT, padx=2)
 
+        # Quantity
         ttk.Label(row_frame, text="Quantity:").pack(side=tk.LEFT, padx=2)
         qty_entry = ttk.Entry(
             row_frame, textvariable=row_data["quantity_var"], width=7)
@@ -211,7 +275,7 @@ class UnitCostCalculatorApp:
         # Unit Type Combobox
         ttk.Label(row_frame, text="Type:").pack(side=tk.LEFT, padx=2)
         unit_type_cb = ttk.Combobox(row_frame, textvariable=row_data["unit_type_var"],
-                                    values=["Dry", "Liquid"], width=7, state='readonly')
+                                    values=["Dry", "Liquid"], width=6, state='readonly')
         unit_type_cb.pack(side=tk.LEFT, padx=2)
         row_data["unit_type_combobox"] = unit_type_cb
         # The lambda needs default arg for row_idx, or it will use the loop's last value
@@ -221,9 +285,15 @@ class UnitCostCalculatorApp:
         # Unit Combobox
         ttk.Label(row_frame, text="Unit:").pack(side=tk.LEFT, padx=2)
         unit_cb = ttk.Combobox(
-            row_frame, textvariable=row_data["unit_var"], width=15, state=tk.DISABLED)
+            row_frame, textvariable=row_data["unit_var"], width=12, state=tk.DISABLED)
         unit_cb.pack(side=tk.LEFT, padx=2)
         row_data["unit_combobox"] = unit_cb
+
+        # URL field
+        ttk.Label(row_frame, text="URL:").pack(side=tk.LEFT, padx=2)
+        url_entry = ttk.Entry(
+            row_frame, textvariable=row_data["url_var"], width=15)
+        url_entry.pack(side=tk.LEFT, padx=2)
 
         # Remove Button for the row (optional, but good UX)
         remove_button = ttk.Button(
@@ -234,6 +304,11 @@ class UnitCostCalculatorApp:
 
         self.input_rows_data.append(row_data)
 
+        # Mark as unsaved and auto-save after adding row
+        if not is_initial_row:  # Don't mark unsaved for the initial empty row
+            self.mark_unsaved()
+        self.root.after_idle(self.auto_save)
+
         # If session type already set (i.e., not the very first row action)
         if self.session_unit_type:
             row_data["unit_type_var"].set(self.session_unit_type)
@@ -242,6 +317,9 @@ class UnitCostCalculatorApp:
         elif not is_initial_row:  # Adding subsequent rows before type is selected
             # Keep disabled until first row sets type
             unit_type_cb.config(state=tk.DISABLED)
+            # If we copied a unit type from previous row, apply it
+            if row_data["unit_type_var"].get():
+                self._on_unit_type_selected(row_idx, is_initial_call=False)
 
         if len(self.input_rows_data) == 1:  # Only one row
             remove_button.config(state=tk.DISABLED)
@@ -278,6 +356,10 @@ class UnitCostCalculatorApp:
         # Update scrollregion
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
+        # Mark as unsaved and auto-save after removing row
+        self.mark_unsaved()
+        self.root.after_idle(self.auto_save)
+
     def calculate_costs(self):
         if not self.session_unit_type:
             messagebox.showerror(
@@ -292,6 +374,8 @@ class UnitCostCalculatorApp:
             price_str = row_data_vars["price_var"].get()
             quantity_str = row_data_vars["quantity_var"].get()
             unit = row_data_vars["unit_var"].get()
+            store = row_data_vars["store_var"].get()
+            url = row_data_vars["url_var"].get().strip()
             # Should be self.session_unit_type
             unit_type = row_data_vars["unit_type_var"].get()
 
@@ -331,6 +415,8 @@ class UnitCostCalculatorApp:
                 "original_quantity": quantity,
                 "original_unit": unit,
                 "unit_type": unit_type,
+                "store": store,
+                "url": url,
                 "price_per_base_unit": price_per_base_unit
             })
 
@@ -362,11 +448,12 @@ class UnitCostCalculatorApp:
             return
 
         # Define columns based on session type
-        common_cols = ["Product", "Orig. Price", "Orig. Qty", "Orig. Unit"]
+        common_cols = ["Product", "Store",
+                       "Orig. Price", "Orig. Qty", "Orig. Unit"]
         if self.session_unit_type == "Dry":
             output_unit_cols = list(DRY_OUTPUT_UNITS.keys())
             price_format_precision = {"per g": 5,
-                                      "per oz (weight)": 4, "per lb": 2}
+                                      "per oz (weight)": 4, "per lb": 2, "per kg": 2}
             output_units_map = DRY_OUTPUT_UNITS
         else:  # Liquid
             output_unit_cols = list(LIQUID_OUTPUT_UNITS.keys())
@@ -380,18 +467,21 @@ class UnitCostCalculatorApp:
 
         for col_name in all_cols:
             self.results_tree.heading(col_name, text=col_name)
-            self.results_tree.column(col_name, anchor=tk.W, width=100 if col_name not in [
-                                     "Product", "Orig. Unit"] else 150)
             if col_name == "Product":
-                self.results_tree.column(col_name, width=180)
-            if "Orig." in col_name:
+                self.results_tree.column(col_name, anchor=tk.W, width=180)
+            elif col_name == "Store":
+                self.results_tree.column(col_name, anchor=tk.W, width=80)
+            elif "Orig." in col_name:
                 self.results_tree.column(col_name, anchor=tk.E, width=80)
-            if "$" in col_name:
+            elif "$" in col_name:
                 self.results_tree.column(col_name, anchor=tk.E, width=100)
+            else:
+                self.results_tree.column(col_name, anchor=tk.W, width=100)
 
         for i, product in enumerate(products_data):
             values = [
                 product["name"],
+                product["store"] if product["store"] else "",
                 f"${product['original_price']:.2f}",
                 f"{product['original_quantity']}",
                 product["original_unit"]
@@ -406,6 +496,125 @@ class UnitCostCalculatorApp:
             self.results_tree.tag_configure(
                 "best_buy", background="lightgreen")
             self.results_tree.insert("", tk.END, values=values, tags=(tag,))
+
+    def update_save_status(self, is_saved=True):
+        """Update the save status indicators"""
+        self.is_saved = is_saved
+        if is_saved:
+            self.save_status_label.config(text="● Saved", foreground="green")
+            self.last_save_time = datetime.now()
+            time_str = self.last_save_time.strftime("%H:%M:%S")
+            self.last_save_label.config(text=f"Last saved: {time_str}")
+        else:
+            self.save_status_label.config(
+                text="● Unsaved", foreground="orange")
+
+    def mark_unsaved(self):
+        """Mark the session as having unsaved changes"""
+        if self.current_filename:  # Only mark unsaved if we have a saved file
+            self.update_save_status(False)
+
+    def auto_save(self):
+        """Auto-save the session if it has been previously saved"""
+        if not self.current_filename:
+            return  # No filename set, don't auto-save
+
+        try:
+            # Create XML structure (same as save_session but without dialog)
+            root_elem = ET.Element("session")
+
+            # Add session title
+            title_elem = ET.SubElement(root_elem, "title")
+            title_elem.text = self.session_title
+
+            # Add unit type
+            if self.session_unit_type:
+                unit_type_elem = ET.SubElement(root_elem, "unit_type")
+                unit_type_elem.text = self.session_unit_type
+
+            # Add products
+            products_elem = ET.SubElement(root_elem, "products")
+
+            for row_data in self.input_rows_data:
+                # Only save rows with some data
+                if (row_data["name_var"].get().strip() or
+                    row_data["price_var"].get().strip() or
+                    row_data["quantity_var"].get().strip() or
+                    row_data["store_var"].get().strip() or
+                        row_data["url_var"].get().strip()):
+
+                    product_elem = ET.SubElement(products_elem, "product")
+
+                    name_elem = ET.SubElement(product_elem, "name")
+                    name_elem.text = row_data["name_var"].get().strip()
+
+                    price_elem = ET.SubElement(product_elem, "price")
+                    price_elem.text = row_data["price_var"].get().strip()
+
+                    quantity_elem = ET.SubElement(product_elem, "quantity")
+                    quantity_elem.text = row_data["quantity_var"].get().strip()
+
+                    unit_type_elem = ET.SubElement(product_elem, "unit_type")
+                    unit_type_elem.text = row_data["unit_type_var"].get()
+
+                    unit_elem = ET.SubElement(product_elem, "unit")
+                    unit_elem.text = row_data["unit_var"].get()
+
+                    store_elem = ET.SubElement(product_elem, "store")
+                    store_elem.text = row_data["store_var"].get()
+
+                    url_elem = ET.SubElement(product_elem, "url")
+                    url_elem.text = row_data["url_var"].get().strip()
+
+            # Write to file
+            tree = ET.ElementTree(root_elem)
+            ET.indent(tree, space="  ", level=0)  # Pretty formatting
+            tree.write(self.current_filename,
+                       encoding="utf-8", xml_declaration=True)
+
+            # Update save status
+            self.update_save_status(True)
+
+        except Exception as e:
+            # Silently fail auto-save to not interrupt user workflow
+            print(f"Auto-save failed: {e}")
+
+    def new_session(self):
+        """Create a new session, checking for unsaved changes"""
+        # Check if there are unsaved changes
+        if not self.is_saved and self.current_filename:
+            result = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "You have unsaved changes. Do you want to save before creating a new session?",
+                icon=messagebox.WARNING
+            )
+            if result is True:  # Yes - save first
+                self.save_session()
+                if not self.is_saved:  # Save was cancelled
+                    return
+            elif result is None:  # Cancel
+                return
+            # No - continue without saving
+
+        # Check if there's existing data (even if saved)
+        elif self.input_rows_data and any(
+            row_data["name_var"].get().strip() or
+            row_data["price_var"].get().strip() or
+            row_data["quantity_var"].get().strip() or
+            row_data["store_var"].get().strip() or
+            row_data["url_var"].get().strip()
+            for row_data in self.input_rows_data
+        ):
+            result = messagebox.askyesno(
+                "New Session",
+                "Creating a new session will clear all current data.\n\nDo you want to continue?",
+                icon=messagebox.QUESTION
+            )
+            if not result:
+                return
+
+        # Clear everything
+        self.reset_session()
 
     def save_session(self):
         if not self.input_rows_data:
@@ -441,7 +650,9 @@ class UnitCostCalculatorApp:
                 # Only save rows with some data
                 if (row_data["name_var"].get().strip() or
                     row_data["price_var"].get().strip() or
-                        row_data["quantity_var"].get().strip()):
+                    row_data["quantity_var"].get().strip() or
+                    row_data["store_var"].get().strip() or
+                        row_data["url_var"].get().strip()):
 
                     product_elem = ET.SubElement(products_elem, "product")
 
@@ -460,15 +671,25 @@ class UnitCostCalculatorApp:
                     unit_elem = ET.SubElement(product_elem, "unit")
                     unit_elem.text = row_data["unit_var"].get()
 
+                    store_elem = ET.SubElement(product_elem, "store")
+                    store_elem.text = row_data["store_var"].get()
+
+                    url_elem = ET.SubElement(product_elem, "url")
+                    url_elem.text = row_data["url_var"].get().strip()
+
             # Write to file
             tree = ET.ElementTree(root_elem)
             ET.indent(tree, space="  ", level=0)  # Pretty formatting
             tree.write(filename, encoding="utf-8", xml_declaration=True)
 
-            # Update session title
+            # Update session title and filename for auto-save
             self.session_title = os.path.splitext(
                 os.path.basename(filename))[0]
             self.session_title_label.config(text=self.session_title)
+            self.current_filename = filename  # Enable auto-save
+
+            # Update save status
+            self.update_save_status(True)
 
             messagebox.showinfo("Success", f"Session saved as '{filename}'")
 
@@ -480,7 +701,9 @@ class UnitCostCalculatorApp:
         if self.input_rows_data and any(
             row_data["name_var"].get().strip() or
             row_data["price_var"].get().strip() or
-            row_data["quantity_var"].get().strip()
+            row_data["quantity_var"].get().strip() or
+            row_data["store_var"].get().strip() or
+            row_data["url_var"].get().strip()
             for row_data in self.input_rows_data
         ):
             result = messagebox.askyesnocancel(
@@ -519,6 +742,9 @@ class UnitCostCalculatorApp:
                 self.session_title = os.path.splitext(
                     os.path.basename(filename))[0]
             self.session_title_label.config(text=self.session_title)
+
+            # Set current filename for auto-save
+            self.current_filename = filename
 
             # Load unit type
             unit_type_elem = root_elem.find("unit_type")
@@ -573,6 +799,14 @@ class UnitCostCalculatorApp:
                         if unit_elem is not None and unit_elem.text:
                             row_data["unit_var"].set(unit_elem.text)
 
+                        store_elem = product_elem.find("store")
+                        if store_elem is not None and store_elem.text:
+                            row_data["store_var"].set(store_elem.text)
+
+                        url_elem = product_elem.find("url")
+                        if url_elem is not None and url_elem.text:
+                            row_data["url_var"].set(url_elem.text)
+
                         # Trigger unit type selection to set up the units dropdown
                         if is_first and self.session_unit_type:
                             self._on_unit_type_selected(
@@ -586,6 +820,9 @@ class UnitCostCalculatorApp:
             # Auto-calculate if we have valid data
             self.calculate_costs()
 
+            # Update save status
+            self.update_save_status(True)
+
             messagebox.showinfo(
                 "Success", f"Session '{self.session_title}' loaded successfully!")
 
@@ -596,6 +833,30 @@ class UnitCostCalculatorApp:
             messagebox.showerror("Error", f"Failed to load session:\n{str(e)}")
 
     def reset_session(self):
+        """Reset the session with proper warnings about auto-save"""
+        # Strong warning if this is a saved session (auto-save enabled)
+        if self.current_filename:
+            result = messagebox.askyesno(
+                "⚠️ PERMANENT RESET WARNING",
+                f"You are about to reset '{self.session_title}'.\n\n"
+                "⚠️ WARNING: This session has auto-save enabled.\n"
+                "Resetting will IMMEDIATELY and PERMANENTLY overwrite\n"
+                "your saved file with an empty session.\n\n"
+                "THIS CANNOT BE UNDONE!\n\n"
+                "Are you absolutely sure you want to continue?",
+                icon=messagebox.WARNING
+            )
+        else:
+            # Regular confirmation for unsaved sessions
+            result = messagebox.askyesno(
+                "Reset Session",
+                "This will clear all current data.\n\nAre you sure you want to continue?",
+                icon=messagebox.QUESTION
+            )
+
+        if not result:
+            return  # User cancelled
+
         # Clear input rows
         for frame in self.input_row_frames:
             frame.destroy()
@@ -611,6 +872,10 @@ class UnitCostCalculatorApp:
         self.session_unit_type = None
         self.session_title = "Untitled Session"
         self.session_title_label.config(text=self.session_title)
+        self.current_filename = None  # Clear filename to disable auto-save
+        self.is_saved = True  # New session is considered saved
+        self.last_save_time = None
+        self.update_save_status(True)
         self.add_row_button.config(state=tk.DISABLED)
         self.calculate_button.config(state=tk.DISABLED)
 
