@@ -1,0 +1,146 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+**Python Backend Coding Guidelines for AI Agents**
+
+You are an expert in modern Python (3.9+), backend development, API design (e.g., FastAPI, Flask), ORMs (e.g., SQLAlchemy, Django ORM), data validation (e.g., Pydantic), testing (e.g., Pytest), and asynchronous programming (e.g., `asyncio`).
+
+**Generic Project Statements**
+- Do not remove any existing code unless strictly necessary and justified.
+- Do not remove my comments or commented-out code unless it's clearly obsolete and a reason is provided.
+- Do not change the formatting of my imports unless it conflicts with project-wide auto-formatting tools (e.g., Black, isort).
+- Do not change the formatting of my code unless important for new functionality or to align with project-wide auto-formatting tools.
+
+**Code Style and Structure**
+- Write concise, idiomatic, and type-hinted Python code with accurate examples.
+- Prefer functional and declarative programming patterns where they enhance clarity and maintainability. Use classes for data structures (e.g., Pydantic models, dataclasses), representing complex entities with behavior, or when object-oriented design provides clear benefits (e.g., stateful services, ORM models).
+- Prioritize iteration (e.g., list comprehensions, generator expressions) and modularization (e.g., well-defined functions, service layers) over code duplication.
+- Use descriptive variable and function names. For boolean flags, use prefixes like `is_`, `has_`, `should_` (e.g., `is_loading`, `has_error`).
+- Structure Python modules logically:
+    1.  Shebang (if applicable for scripts)
+    2.  Module docstring
+    3.  Imports (standard library, third-party, then local application imports, each group alphabetized)
+    4.  Constants (e.g., `ALL_CAPS_WITH_UNDERSCORES`)
+    5.  Type definitions (e.g., `TypeAlias`, Pydantic models, dataclasses) if not extensive enough for a separate `types.py` or `models.py`.
+    6.  Core logic: functions and classes.
+    7.  Helper functions (often prefixed with `_` if internal to the module).
+    8.  `if __name__ == "__main__":` block for executable scripts.
+
+**Naming Conventions**
+- Use `snake_case` for directories (packages), filenames (modules), functions, methods, and variables (e.g., `services/user_service.py`, `def get_user_profile():`, `current_user`).
+- Use `PascalCase` for class names (e.g., `class UserProfile:`, `class AuthenticationError(Exception):`).
+- Constants should be `ALL_CAPS_WITH_UNDERSCORES` (e.g., `MAX_RETRIES = 3`).
+
+**Python Usage**
+- Use modern Python (e.g., Python 3.9+ or as specified by the project).
+- Utilize type hints extensively for all function signatures and critical variables. Use `typing.TYPE_CHECKING` for import cycles related to type hints.
+- Prefer Pydantic models or `dataclasses` (with `frozen=True` for immutability where appropriate) for data structures over plain dictionaries or tuples for complex data.
+- Use Python's built-in `enum.Enum` for fixed sets of related constants where appropriate (e.g., status codes, choices).
+- Define custom exceptions inheriting from base `Exception` or more specific built-ins for clear error signaling.
+
+**Syntax and Formatting**
+- Use an auto-formatter like Black and a linter like Ruff (or Flake8/Pylint + isort). Adhere to their default configurations unless project-specific overrides are established.
+- Use `def` for defining functions and methods.
+- Always use explicit blocks (indentation) for conditionals and loops, even for single-line bodies. Favor simplicity and readability over overly "clever" or condensed code.
+- Write comprehensive docstrings for all public modules, classes, functions, and methods, following a standard format (e.g., Google, NumPy, or reStructuredText).
+
+**Performance Optimization**
+- Look for ways to make things faster and more memory-efficient:
+    - Use immutable data structures (e.g., tuples, `frozenset`, Pydantic models with `frozen=True`, `attrs` classes with `frozen=True`) where appropriate.
+    - Implement efficient database query strategies (e.g., select only needed columns, use joins effectively, avoid N+1 query problems, use database indexes).
+    - Optimize network requests (e.g., batching, caching, compression).
+    - Use efficient built-in data structures (e.g., sets for membership testing, dictionaries for lookups).
+    - Choose efficient algorithms for the task at hand.
+    - Utilize generators and iterators for processing large datasets to conserve memory.
+    - Employ `asyncio` and `await` for I/O-bound operations to improve concurrency and responsiveness, if the framework supports it (e.g., FastAPI, aiohttp).
+
+**API Design and Structure (if applicable)**
+- Keep API endpoint handlers (e.g., FastAPI path operation functions, Flask route functions) lean. Delegate business logic to service layer functions/classes.
+- Use Pydantic models (or similar data validation libraries) for request body validation, query parameter parsing, and response serialization. This ensures clear data contracts.
+- Version your APIs (e.g., `/api/v1/users`).
+- Use appropriate HTTP status codes.
+
+**Modularity and Service Layers (Analogue to "Component Hook Encapsulation")**
+- Always encapsulate related business logic, data access, and external service integrations within dedicated service functions or classes, rather than directly in API endpoint handlers or high-level orchestration code. Keep endpoint handlers focused on request/response handling and delegation.
+
+**Good Practice Example (Service Layer Abstraction):**
+
+```python
+# services/user_service.py
+from typing import Optional
+from models.user_models import User, UserCreate, UserUpdate # Assuming Pydantic models
+from db.database_utils import get_user_from_db, update_user_in_db, create_user_in_db # Hypothetical DB utils
+
+class UserService:
+    def __init__(self, db_session): # Or however you manage DB sessions
+        self.db_session = db_session
+
+    async def get_user_by_id(self, user_id: int) -> Optional[User]:
+        # Logic to fetch user, perhaps with caching, error handling
+        user_data = await get_user_from_db(self.db_session, user_id)
+        if user_data:
+            return User(**user_data)
+        return None
+
+    async def create_new_user(self, user_data: UserCreate) -> User:
+        # Logic for validation (beyond Pydantic if needed), hashing passwords, etc.
+        created_user_data = await create_user_in_db(self.db_session, user_data.model_dump())
+        return User(**created_user_data)
+
+    async def update_existing_user(self, user_id: int, user_update_data: UserUpdate) -> Optional[User]:
+        # Logic for partial updates, ensuring user exists, etc.
+        updated_user_data = await update_user_in_db(self.db_session, user_id, user_update_data.model_dump(exclude_unset=True))
+        if updated_user_data:
+            return User(**updated_user_data)
+        return None
+
+# api/routes/user_routes.py (e.g., using FastAPI)
+from fastapi import APIRouter, Depends, HTTPException
+from models.user_models import User, UserCreate, UserUpdate
+from services.user_service import UserService
+# Assume get_db_session and get_user_service are dependency injections
+
+router = APIRouter()
+
+@router.get("/users/{user_id}", response_model=User)
+async def read_user(user_id: int, user_service: UserService = Depends(get_user_service)):
+    user = await user_service.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+@router.post("/users/", response_model=User, status_code=201)
+async def create_user_endpoint(user_data: UserCreate, user_service: UserService = Depends(get_user_service)):
+    # Endpoint handler is clean, delegates to service
+    return await user_service.create_new_user(user_data)
+```
+
+**Data Models and Validation (Analogue to "Forms")**
+- Define clear data structures for API request and response payloads, database models, and internal data transfer objects.
+- Use Pydantic models (or `dataclasses` with validation libraries) extensively for:
+    - Defining expected structure and types.
+    - Automatic data validation and parsing.
+    - Serialization to/from JSON (or other formats).
+    - Generating OpenAPI schema documentation (if using frameworks like FastAPI).
+- Place these models in logical locations, such as a `models/` directory or `schemas.py` files within specific application modules (e.g., `users/models.py`).
+
+**Testing**
+- Write unit tests (using Pytest or `unittest`) for individual functions and classes, focusing on business logic and edge cases.
+- Write integration tests to verify interactions between different components (e.g., service layer with database, API endpoints).
+- Aim for high test coverage.
+- Use mocking/patching judiciously to isolate units under test.
+
+**Environment and Dependencies**
+- Always use virtual environments (e.g., `venv`, Poetry, Conda).
+- Manage dependencies using `pyproject.toml` (with tools like Poetry or PDM) or `requirements.txt`. Pin dependencies for reproducible builds.
+
+**Logging and Error Handling**
+- Use the standard `logging` module for application logging. Configure it appropriately for different environments (development, staging, production).
+- Log meaningful information, including context and tracebacks for errors.
+- Handle exceptions gracefully. Use `try-except-else-finally` blocks where appropriate. Catch specific exceptions rather than generic `Exception` where possible.
+
+---
+
+This set of rules should provide a solid foundation for AI agents coding in Python for backend systems. Remember to adapt them further if your project has very specific needs or uses a niche Python framework with its own conventions.
