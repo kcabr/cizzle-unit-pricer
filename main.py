@@ -4,6 +4,15 @@ import xml.etree.ElementTree as ET
 import os
 from datetime import datetime
 
+# Try to import yaml, fallback to json if not available
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    import json
+    HAS_YAML = False
+    print("PyYAML not found, falling back to JSON for config file")
+
 # --- Constants ---
 # Conversion factors to base units
 # Base unit for Dry is gram (g)
@@ -32,8 +41,8 @@ STORE_OPTIONS = ["Aldi", "Amazon", "Target", "Walmart", "Other"]
 DRY_OUTPUT_UNITS = {
     "per g": 1.0,
     "per oz": DRY_UNITS_TO_BASE["oz"],  # grams per oz
-    # "per lb": DRY_UNITS_TO_BASE["lb"],          # grams per lb
-    # "per kg": DRY_UNITS_TO_BASE["kg"],          # grams per kg
+    "per lb": DRY_UNITS_TO_BASE["lb"],          # grams per lb
+    "per kg": DRY_UNITS_TO_BASE["kg"],          # grams per kg
 }
 # For Liquid (base: ml)
 LIQUID_OUTPUT_UNITS = {
@@ -61,10 +70,15 @@ class UnitCostCalculatorApp:
         self.input_rows_data = []  # Stores dicts of tk.Vars for each row
         self.input_row_frames = []  # Stores the Frame widget for each input row
         self.config_file = os.path.join(
-            os.path.expanduser("~"), ".unit_cost_calculator_config")
+            os.path.expanduser("~"),
+            ".unit_cost_calculator_config.yaml" if HAS_YAML else ".unit_cost_calculator_config.json"
+        )
 
         self._setup_ui()
         self.add_input_row(is_initial_row=True)  # Add the first row initially
+
+        # Initialize config file (creates it if it doesn't exist)
+        self.load_config()
 
         # Load last session if available
         self.load_last_session()
@@ -122,11 +136,6 @@ class UnitCostCalculatorApp:
         # Disabled until session type is set
         self.add_row_button.config(state=tk.DISABLED)
 
-        self.calculate_button = ttk.Button(
-            controls_frame, text="Calculate & Compare", command=self.calculate_costs)
-        self.calculate_button.pack(side=tk.LEFT, padx=5)
-        self.calculate_button.config(state=tk.DISABLED)
-
         reset_button = ttk.Button(
             controls_frame, text="Reset All", command=self.reset_session)
         reset_button.pack(side=tk.LEFT, padx=5)
@@ -174,6 +183,9 @@ class UnitCostCalculatorApp:
         self.results_tree.configure(
             yscrollcommand=tree_ysb.set, xscrollcommand=tree_xsb.set)
 
+        # Bind click event for copying price values to clipboard
+        self.results_tree.bind('<Button-1>', self.on_treeview_click)
+
     def _on_unit_type_selected(self, row_idx, is_initial_call=False):
         row_data = self.input_rows_data[row_idx]
         selected_type = row_data["unit_type_var"].get()
@@ -192,7 +204,6 @@ class UnitCostCalculatorApp:
                     state=tk.DISABLED if i > 0 or not is_initial_call else tk.NORMAL)
             # Enable adding more rows
             self.add_row_button.config(state=tk.NORMAL)
-            self.calculate_button.config(state=tk.NORMAL)  # Enable calculation
 
         elif selected_type != self.session_unit_type:
             # This case should ideally not happen if UI logic is correct
@@ -257,13 +268,15 @@ class UnitCostCalculatorApp:
         name_entry.bind(
             '<Button-1>', lambda e: name_entry.after(1, on_product_focus, e))
 
-        # Bind to StringVar changes for auto-save
+        # Bind to StringVar changes for auto-save and auto-calculate
         def on_field_change(*args):
             if not self.loading_session:  # Don't mark unsaved during loading
                 self.mark_unsaved()  # Mark as unsaved first
                 # Auto-save after current event processing only if we have a saved file
                 if self.current_filename:
                     self.root.after_idle(self.auto_save)
+                # Auto-calculate results when data changes
+                self.root.after_idle(self.auto_calculate)
 
         row_data["name_var"].trace_add("write", on_field_change)
         row_data["price_var"].trace_add("write", on_field_change)
@@ -329,6 +342,9 @@ class UnitCostCalculatorApp:
             self.mark_unsaved()
         if self.current_filename:  # Only auto-save if we have a saved file
             self.root.after_idle(self.auto_save)
+        # Auto-calculate when adding new rows
+        if not is_initial_row:
+            self.root.after_idle(self.auto_calculate)
 
         # If session type already set (i.e., not the very first row action)
         if self.session_unit_type:
@@ -381,6 +397,8 @@ class UnitCostCalculatorApp:
         self.mark_unsaved()
         if self.current_filename:  # Only auto-save if we have a saved file
             self.root.after_idle(self.auto_save)
+        # Auto-calculate after removing rows
+        self.root.after_idle(self.auto_calculate)
 
     def calculate_costs(self):
         if not self.session_unit_type:
@@ -612,6 +630,41 @@ class UnitCostCalculatorApp:
             # Silently fail auto-save to not interrupt user workflow
             print(f"Auto-save failed: {e}")
 
+    def auto_calculate(self):
+        """Automatically calculate results if there's meaningful data"""
+        if not self.session_unit_type:
+            # Clear results if no session type set
+            for item in self.results_tree.get_children():
+                self.results_tree.delete(item)
+            self.results_tree["columns"] = []
+            return
+
+        # Check if any row has meaningful data for calculation
+        has_meaningful_data = False
+        for row_data in self.input_rows_data:
+            name = row_data["name_var"].get().strip()
+            price_str = row_data["price_var"].get().strip()
+            quantity_str = row_data["quantity_var"].get().strip()
+            unit = row_data["unit_var"].get().strip()
+
+            # Need at least price, quantity, and unit for meaningful calculation
+            if price_str and quantity_str and unit:
+                try:
+                    float(price_str)
+                    float(quantity_str)
+                    has_meaningful_data = True
+                    break
+                except ValueError:
+                    continue
+
+        if has_meaningful_data:
+            self.calculate_costs()
+        else:
+            # Clear results if no meaningful data
+            for item in self.results_tree.get_children():
+                self.results_tree.delete(item)
+            self.results_tree["columns"] = []
+
     def new_session(self):
         """Create a new session, checking for unsaved changes"""
         # Check if there are unsaved changes
@@ -806,7 +859,6 @@ class UnitCostCalculatorApp:
                             self.session_unit_type)
                         self._on_unit_type_selected(0, is_initial_call=True)
                         self.add_row_button.config(state=tk.NORMAL)
-                        self.calculate_button.config(state=tk.NORMAL)
                 else:
                     # Remove the initial empty row first
                     if self.input_rows_data:
@@ -857,7 +909,6 @@ class UnitCostCalculatorApp:
             # Enable buttons if we have a session type
             if self.session_unit_type:
                 self.add_row_button.config(state=tk.NORMAL)
-                self.calculate_button.config(state=tk.NORMAL)
 
             # Auto-calculate if we have valid data (check if any row has meaningful data)
             has_data = any(
@@ -928,28 +979,70 @@ class UnitCostCalculatorApp:
         self.loading_session = False  # Reset loading session flag
         self.update_save_status(False)
         self.add_row_button.config(state=tk.DISABLED)
-        self.calculate_button.config(state=tk.DISABLED)
 
         # Add one initial blank row
         self.add_input_row(is_initial_row=True)
 
-    def save_last_session_path(self, filename):
-        """Save the last session filename for auto-loading"""
+    def save_config(self):
+        """Save configuration to file"""
+        config_data = {
+            "last_session_file": self.current_filename,
+            "version": "1.0"
+        }
+
         try:
             with open(self.config_file, 'w') as f:
-                f.write(filename)
+                if HAS_YAML:
+                    yaml.dump(config_data, f, default_flow_style=False)
+                else:
+                    json.dump(config_data, f, indent=2)
         except Exception as e:
-            print(f"Failed to save last session path: {e}")
+            print(f"Failed to save config: {e}")
 
-    def get_last_session_path(self):
-        """Get the last session filename"""
+    def load_config(self):
+        """Load configuration from file, create default if doesn't exist"""
+        default_config = {
+            "last_session_file": None,
+            "version": "1.0"
+        }
+
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r') as f:
-                    return f.read().strip()
+                    if HAS_YAML:
+                        config_data = yaml.safe_load(f)
+                    else:
+                        config_data = json.load(f)
+                return config_data if config_data else default_config
+            else:
+                # Create default config file
+                self.save_config_data(default_config)
+                return default_config
         except Exception as e:
-            print(f"Failed to read last session path: {e}")
-        return None
+            print(f"Failed to load config: {e}")
+            return default_config
+
+    def save_config_data(self, config_data):
+        """Save given config data to file"""
+        try:
+            with open(self.config_file, 'w') as f:
+                if HAS_YAML:
+                    yaml.dump(config_data, f, default_flow_style=False)
+                else:
+                    json.dump(config_data, f, indent=2)
+        except Exception as e:
+            print(f"Failed to save config data: {e}")
+
+    def get_last_session_path(self):
+        """Get the last session filename from config"""
+        config = self.load_config()
+        return config.get("last_session_file")
+
+    def save_last_session_path(self, filename):
+        """Save the last session filename to config"""
+        config = self.load_config()
+        config["last_session_file"] = filename
+        self.save_config_data(config)
 
     def load_last_session(self):
         """Automatically load the last session if it exists"""
@@ -966,7 +1059,7 @@ class UnitCostCalculatorApp:
                 # Set loading flag to prevent auto-save during loading
                 self.loading_session = True
 
-                # Clear current session (without dialog since this is startup)
+                # Clear current session
                 for frame in self.input_row_frames:
                     frame.destroy()
                 self.input_row_frames.clear()
@@ -1009,7 +1102,6 @@ class UnitCostCalculatorApp:
                             self._on_unit_type_selected(
                                 0, is_initial_call=True)
                             self.add_row_button.config(state=tk.NORMAL)
-                            self.calculate_button.config(state=tk.NORMAL)
                     else:
                         # Add rows for each product
                         for i, product_elem in enumerate(products):
@@ -1056,7 +1148,6 @@ class UnitCostCalculatorApp:
                 # Enable buttons if we have a session type
                 if self.session_unit_type:
                     self.add_row_button.config(state=tk.NORMAL)
-                    self.calculate_button.config(state=tk.NORMAL)
 
                 # Auto-calculate if we have valid data (check if any row has meaningful data)
                 has_data = any(
@@ -1075,8 +1166,75 @@ class UnitCostCalculatorApp:
             except Exception as e:
                 print(f"Failed to auto-load last session: {e}")
 
-
                 # If loading fails, just start with default empty session
+
+    def on_treeview_click(self, event):
+        """Handle clicks on treeview to copy price values to clipboard"""
+        # Get the region that was clicked
+        region = self.results_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        # Get the column and item that was clicked
+        column = self.results_tree.identify_column(
+            event.x)  # Only x coordinate
+        item = self.results_tree.identify_row(
+            event.y)       # Only y coordinate
+
+        if not item or not column:
+            return
+
+        # Get column index (columns are numbered starting from #1)
+        try:
+            # Convert "#3" to 2 (0-based index)
+            col_index = int(column[1:]) - 1
+        except (ValueError, IndexError):
+            return
+
+        # Get all column headers
+        columns = self.results_tree["columns"]
+        if col_index >= len(columns):
+            return
+
+        # Check if this is a price column (starts with "$ ")
+        column_name = columns[col_index]
+        if not column_name.startswith("$ "):
+            return
+
+        # Get the values for this item
+        values = self.results_tree.item(item, "values")
+        if col_index >= len(values):
+            return
+
+        # Get the price value and copy to clipboard
+        price_value = values[col_index]
+        if price_value.startswith("$"):
+            # Copy to clipboard without the dollar sign
+            numeric_value = price_value[1:]  # Remove the "$" prefix
+            self.root.clipboard_clear()
+            self.root.clipboard_append(numeric_value)
+
+            # Show brief visual feedback
+            self.show_copy_feedback(column_name, numeric_value)
+
+    def show_copy_feedback(self, column_name, value):
+        """Show brief feedback that value was copied"""
+        # Temporarily update the last save label to show copy feedback
+        original_text = self.last_save_label.cget("text")
+        original_color = self.last_save_label.cget("foreground")
+
+        self.last_save_label.config(
+            text=f"Copied: {value}",
+            foreground="blue"
+        )
+
+        # Restore original text after 2 seconds
+        self.root.after(2000, lambda: self.last_save_label.config(
+            text=original_text,
+            foreground=original_color
+        ))
+
+
 if __name__ == "__main__":
     main_root = tk.Tk()
     app = UnitCostCalculatorApp(main_root)

@@ -40,6 +40,7 @@ The Unit Cost Calculator helps you make informed shopping decisions by:
 
 - Python 3.9 or higher
 - tkinter (usually included with Python)
+- PyYAML (optional, for better config file format - will fallback to JSON if not available)
 
 ### Installation
 
@@ -58,7 +59,15 @@ The Unit Cost Calculator helps you make informed shopping decisions by:
 
    If Python is not installed, download it from [python.org](https://python.org)
 
-3. **Run the application**
+3. **Install PyYAML (optional, for better config files)**
+
+   ```bash
+   pip install PyYAML
+   ```
+
+   If not installed, the app will use JSON format for config files instead.
+
+4. **Run the application**
    ```bash
    python main.py
    ```
