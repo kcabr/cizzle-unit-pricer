@@ -47,7 +47,7 @@ class UnitCostCalculatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Unit Cost Calculator")
-        self.root.geometry("900x700")  # Adjusted size
+        self.root.geometry("1200x700")  # Wider initial window
 
         self.style = ttk.Style()
         self.style.theme_use('clam')  # Or 'alt', 'default', 'classic'
@@ -55,15 +55,44 @@ class UnitCostCalculatorApp:
         self.session_unit_type = None  # "Dry" or "Liquid"
         self.session_title = "Untitled Session"  # Track session title
         self.current_filename = None  # Track current saved filename for auto-save
-        self.is_saved = True  # Track if current state is saved
+        self.is_saved = False  # Track if current state is saved - start as False for untitled
         self.last_save_time = None  # Track last save time
+        self.loading_session = False  # Flag to prevent auto-save during loading
         self.input_rows_data = []  # Stores dicts of tk.Vars for each row
         self.input_row_frames = []  # Stores the Frame widget for each input row
+        self.config_file = os.path.join(
+            os.path.expanduser("~"), ".unit_cost_calculator_config")
 
         self._setup_ui()
         self.add_input_row(is_initial_row=True)  # Add the first row initially
 
+        # Load last session if available
+        self.load_last_session()
+
     def _setup_ui(self):
+        # --- Menu Bar ---
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="New Session",
+                              command=self.new_session, accelerator="Ctrl+N")
+        file_menu.add_separator()
+        file_menu.add_command(label="Load Session...",
+                              command=self.load_session, accelerator="Ctrl+O")
+        file_menu.add_command(label="Save Session...",
+                              command=self.save_session, accelerator="Ctrl+S")
+
+        # Bind keyboard shortcuts
+        self.root.bind('<Control-n>', lambda e: self.new_session())
+        self.root.bind('<Control-o>', lambda e: self.load_session())
+        self.root.bind('<Control-s>', lambda e: self.save_session())
+
+        # Store reference to file menu for enabling/disabling save option
+        self.file_menu = file_menu
+
         # --- Session Title Frame ---
         title_frame = ttk.Frame(self.root, padding="10")
         title_frame.pack(fill=tk.X)
@@ -77,27 +106,16 @@ class UnitCostCalculatorApp:
         controls_frame = ttk.Frame(self.root, padding="10")
         controls_frame.pack(fill=tk.X)
 
-        # File operations
-        ttk.Button(controls_frame, text="New Session",
-                   command=self.new_session).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls_frame, text="Save Session",
-                   command=self.save_session).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls_frame, text="Load Session",
-                   command=self.load_session).pack(side=tk.LEFT, padx=5)
-
-        # Save status and time
-        self.save_status_label = ttk.Label(
-            controls_frame, text="● Saved", foreground="green")
-        self.save_status_label.pack(side=tk.LEFT, padx=(15, 5))
-
+        # Save status and time (pack on right side first)
         self.last_save_label = ttk.Label(
             controls_frame, text="", foreground="gray")
-        self.last_save_label.pack(side=tk.LEFT, padx=5)
+        self.last_save_label.pack(side=tk.RIGHT, padx=5)
 
-        # Separator
-        ttk.Separator(controls_frame, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, padx=10, fill=tk.Y)
+        self.save_status_label = ttk.Label(
+            controls_frame, text="", foreground="gray")
+        self.save_status_label.pack(side=tk.RIGHT, padx=(5, 0))
 
+        # Buttons and controls (pack on left side)
         self.add_row_button = ttk.Button(
             controls_frame, text="+ Add Product", command=self.add_input_row_button_action)
         self.add_row_button.pack(side=tk.LEFT, padx=5)
@@ -228,7 +246,7 @@ class UnitCostCalculatorApp:
         # Product name
         ttk.Label(row_frame, text="Product:").pack(side=tk.LEFT, padx=2)
         name_entry = ttk.Entry(
-            row_frame, textvariable=row_data["name_var"], width=18)
+            row_frame, textvariable=row_data["name_var"], width=35)
         name_entry.pack(side=tk.LEFT, padx=2)
 
         # Add focus event to select all text in product field for easy replacement
@@ -241,9 +259,11 @@ class UnitCostCalculatorApp:
 
         # Bind to StringVar changes for auto-save
         def on_field_change(*args):
-            self.mark_unsaved()  # Mark as unsaved first
-            # Auto-save after current event processing
-            self.root.after_idle(self.auto_save)
+            if not self.loading_session:  # Don't mark unsaved during loading
+                self.mark_unsaved()  # Mark as unsaved first
+                # Auto-save after current event processing only if we have a saved file
+                if self.current_filename:
+                    self.root.after_idle(self.auto_save)
 
         row_data["name_var"].trace_add("write", on_field_change)
         row_data["price_var"].trace_add("write", on_field_change)
@@ -292,7 +312,7 @@ class UnitCostCalculatorApp:
         # URL field
         ttk.Label(row_frame, text="URL:").pack(side=tk.LEFT, padx=2)
         url_entry = ttk.Entry(
-            row_frame, textvariable=row_data["url_var"], width=15)
+            row_frame, textvariable=row_data["url_var"], width=30)
         url_entry.pack(side=tk.LEFT, padx=2)
 
         # Remove Button for the row (optional, but good UX)
@@ -307,7 +327,8 @@ class UnitCostCalculatorApp:
         # Mark as unsaved and auto-save after adding row
         if not is_initial_row:  # Don't mark unsaved for the initial empty row
             self.mark_unsaved()
-        self.root.after_idle(self.auto_save)
+        if self.current_filename:  # Only auto-save if we have a saved file
+            self.root.after_idle(self.auto_save)
 
         # If session type already set (i.e., not the very first row action)
         if self.session_unit_type:
@@ -358,7 +379,8 @@ class UnitCostCalculatorApp:
 
         # Mark as unsaved and auto-save after removing row
         self.mark_unsaved()
-        self.root.after_idle(self.auto_save)
+        if self.current_filename:  # Only auto-save if we have a saved file
+            self.root.after_idle(self.auto_save)
 
     def calculate_costs(self):
         if not self.session_unit_type:
@@ -497,14 +519,20 @@ class UnitCostCalculatorApp:
                 "best_buy", background="lightgreen")
             self.results_tree.insert("", tk.END, values=values, tags=(tag,))
 
-    def update_save_status(self, is_saved=True):
+    def update_save_status(self, is_saved=True, from_loading=False):
         """Update the save status indicators"""
         self.is_saved = is_saved
-        if is_saved:
+        if not self.current_filename:  # No filename means untitled session
+            self.save_status_label.config(text="", foreground="gray")
+            self.last_save_label.config(text="Untitled Session")
+        elif is_saved:
             self.save_status_label.config(text="● Saved", foreground="green")
-            self.last_save_time = datetime.now()
-            time_str = self.last_save_time.strftime("%H:%M:%S")
-            self.last_save_label.config(text=f"Last saved: {time_str}")
+            if not from_loading:  # Only update timestamp for actual saves, not loading
+                self.last_save_time = datetime.now()
+                time_str = self.last_save_time.strftime("%H:%M:%S")
+                self.last_save_label.config(text=f"Last saved: {time_str}")
+            else:  # When loading, just show that it's loaded
+                self.last_save_label.config(text="Loaded from file")
         else:
             self.save_status_label.config(
                 text="● Unsaved", foreground="orange")
@@ -513,6 +541,8 @@ class UnitCostCalculatorApp:
         """Mark the session as having unsaved changes"""
         if self.current_filename:  # Only mark unsaved if we have a saved file
             self.update_save_status(False)
+            # Re-enable manual save option since there are unsaved changes
+            self.file_menu.entryconfig("Save Session...", state=tk.NORMAL)
 
     def auto_save(self):
         """Auto-save the session if it has been previously saved"""
@@ -574,6 +604,9 @@ class UnitCostCalculatorApp:
 
             # Update save status
             self.update_save_status(True)
+
+            # Disable manual save option since auto-save just happened
+            self.file_menu.entryconfig("Save Session...", state=tk.DISABLED)
 
         except Exception as e:
             # Silently fail auto-save to not interrupt user workflow
@@ -688,8 +721,14 @@ class UnitCostCalculatorApp:
             self.session_title_label.config(text=self.session_title)
             self.current_filename = filename  # Enable auto-save
 
+            # Save as last session for auto-loading
+            self.save_last_session_path(filename)
+
             # Update save status
             self.update_save_status(True)
+
+            # Disable manual save option since save just happened
+            self.file_menu.entryconfig("Save Session...", state=tk.DISABLED)
 
             messagebox.showinfo("Success", f"Session saved as '{filename}'")
 
@@ -730,6 +769,9 @@ class UnitCostCalculatorApp:
             if root_elem.tag != "session":
                 messagebox.showerror("Error", "Invalid session file format.")
                 return
+
+            # Set loading flag to prevent auto-save during loading
+            self.loading_session = True
 
             # Clear current session
             self.reset_session()
@@ -817,11 +859,19 @@ class UnitCostCalculatorApp:
                 self.add_row_button.config(state=tk.NORMAL)
                 self.calculate_button.config(state=tk.NORMAL)
 
-            # Auto-calculate if we have valid data
-            self.calculate_costs()
+            # Auto-calculate if we have valid data (check if any row has meaningful data)
+            has_data = any(
+                row_data["name_var"].get().strip() or
+                row_data["price_var"].get().strip() or
+                row_data["quantity_var"].get().strip()
+                for row_data in self.input_rows_data
+            )
+            if has_data and self.session_unit_type:
+                self.calculate_costs()
 
-            # Update save status
-            self.update_save_status(True)
+            # Clear loading flag and update save status
+            self.loading_session = False
+            self.update_save_status(True, from_loading=True)
 
             messagebox.showinfo(
                 "Success", f"Session '{self.session_title}' loaded successfully!")
@@ -873,16 +923,160 @@ class UnitCostCalculatorApp:
         self.session_title = "Untitled Session"
         self.session_title_label.config(text=self.session_title)
         self.current_filename = None  # Clear filename to disable auto-save
-        self.is_saved = True  # New session is considered saved
+        self.is_saved = False  # New session is considered saved
         self.last_save_time = None
-        self.update_save_status(True)
+        self.loading_session = False  # Reset loading session flag
+        self.update_save_status(False)
         self.add_row_button.config(state=tk.DISABLED)
         self.calculate_button.config(state=tk.DISABLED)
 
         # Add one initial blank row
         self.add_input_row(is_initial_row=True)
 
+    def save_last_session_path(self, filename):
+        """Save the last session filename for auto-loading"""
+        try:
+            with open(self.config_file, 'w') as f:
+                f.write(filename)
+        except Exception as e:
+            print(f"Failed to save last session path: {e}")
 
+    def get_last_session_path(self):
+        """Get the last session filename"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    return f.read().strip()
+        except Exception as e:
+            print(f"Failed to read last session path: {e}")
+        return None
+
+    def load_last_session(self):
+        """Automatically load the last session if it exists"""
+        last_file = self.get_last_session_path()
+        if last_file and os.path.exists(last_file):
+            try:
+                # Use the existing load logic but without user dialogs
+                tree = ET.parse(last_file)
+                root_elem = tree.getroot()
+
+                if root_elem.tag != "session":
+                    return  # Invalid format, skip silently
+
+                # Set loading flag to prevent auto-save during loading
+                self.loading_session = True
+
+                # Clear current session (without dialog since this is startup)
+                for frame in self.input_row_frames:
+                    frame.destroy()
+                self.input_row_frames.clear()
+                self.input_rows_data.clear()
+
+                # Clear results
+                for item in self.results_tree.get_children():
+                    self.results_tree.delete(item)
+                self.results_tree["columns"] = []
+
+                # Load session title
+                title_elem = root_elem.find("title")
+                if title_elem is not None and title_elem.text:
+                    self.session_title = title_elem.text
+                else:
+                    self.session_title = os.path.splitext(
+                        os.path.basename(last_file))[0]
+                self.session_title_label.config(text=self.session_title)
+
+                # Set current filename for auto-save
+                self.current_filename = last_file
+
+                # Load unit type
+                unit_type_elem = root_elem.find("unit_type")
+                if unit_type_elem is not None and unit_type_elem.text:
+                    self.session_unit_type = unit_type_elem.text
+
+                # Load products
+                products_elem = root_elem.find("products")
+                if products_elem is not None:
+                    products = products_elem.findall("product")
+
+                    if not products:
+                        # No products, add initial empty row
+                        self.add_input_row(is_initial_row=True)
+                        if self.session_unit_type:
+                            # Set the unit type for the initial row
+                            self.input_rows_data[0]["unit_type_var"].set(
+                                self.session_unit_type)
+                            self._on_unit_type_selected(
+                                0, is_initial_call=True)
+                            self.add_row_button.config(state=tk.NORMAL)
+                            self.calculate_button.config(state=tk.NORMAL)
+                    else:
+                        # Add rows for each product
+                        for i, product_elem in enumerate(products):
+                            is_first = (i == 0)
+                            self.add_input_row(is_initial_row=is_first)
+                            row_data = self.input_rows_data[-1]
+
+                            # Load product data
+                            name_elem = product_elem.find("name")
+                            if name_elem is not None and name_elem.text:
+                                row_data["name_var"].set(name_elem.text)
+
+                            price_elem = product_elem.find("price")
+                            if price_elem is not None and price_elem.text:
+                                row_data["price_var"].set(price_elem.text)
+
+                            quantity_elem = product_elem.find("quantity")
+                            if quantity_elem is not None and quantity_elem.text:
+                                row_data["quantity_var"].set(
+                                    quantity_elem.text)
+
+                            unit_type_elem = product_elem.find("unit_type")
+                            if unit_type_elem is not None and unit_type_elem.text:
+                                row_data["unit_type_var"].set(
+                                    unit_type_elem.text)
+
+                            unit_elem = product_elem.find("unit")
+                            if unit_elem is not None and unit_elem.text:
+                                row_data["unit_var"].set(unit_elem.text)
+
+                            store_elem = product_elem.find("store")
+                            if store_elem is not None and store_elem.text:
+                                row_data["store_var"].set(store_elem.text)
+
+                            url_elem = product_elem.find("url")
+                            if url_elem is not None and url_elem.text:
+                                row_data["url_var"].set(url_elem.text)
+
+                            # Trigger unit type selection to set up the units dropdown
+                            if is_first and self.session_unit_type:
+                                self._on_unit_type_selected(
+                                    len(self.input_rows_data) - 1, is_initial_call=True)
+
+                # Enable buttons if we have a session type
+                if self.session_unit_type:
+                    self.add_row_button.config(state=tk.NORMAL)
+                    self.calculate_button.config(state=tk.NORMAL)
+
+                # Auto-calculate if we have valid data (check if any row has meaningful data)
+                has_data = any(
+                    row_data["name_var"].get().strip() or
+                    row_data["price_var"].get().strip() or
+                    row_data["quantity_var"].get().strip()
+                    for row_data in self.input_rows_data
+                )
+                if has_data and self.session_unit_type:
+                    self.calculate_costs()
+
+                # Clear loading flag and update save status
+                self.loading_session = False
+                self.update_save_status(True, from_loading=True)
+
+            except Exception as e:
+                print(f"Failed to auto-load last session: {e}")
+
+
+                # If loading fails, just start with default empty session
 if __name__ == "__main__":
     main_root = tk.Tk()
     app = UnitCostCalculatorApp(main_root)
